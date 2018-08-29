@@ -1,9 +1,6 @@
 ﻿
 #include "StringDemo.h"				// string 实例
-using namespace std;
 #include <string>
-
-
 #include <stdio.h>
 #include <windows.h>  
 #include <iostream>
@@ -12,64 +9,84 @@ using namespace std;
 using namespace std;
 
 
-#define BUILDING_LIBCURL
-#define HTTP_ONLY
-#pragma comment(lib,"libcurl.lib")
-#pragma comment(lib,"winmm.lib")
-#pragma comment(lib,"wldap32.lib")
-#pragma comment(lib,"ws2_32.lib")
+//#define BUILDING_LIBCURL
+//#define HTTP_ONLY
+#define USE_OPENSSL	1
+#define CURL_STATICLIB	1
+
+#pragma comment(lib, "ws2_32.lib")  
+#pragma comment(lib, "wldap32.lib")  
+#pragma comment(lib, "libcurl.lib")
+//#pragma comment(lib,"crypt32.lib")
+
+
 #include <curl/curl.h>
-#include "assert.h"
+#include "Windows.h"
+#include "DbgHelp.h"
 
-size_t Reply(void * ptr, size_t size, size_t nmemb, void * stream)
+int GenerateMiniDump(PEXCEPTION_POINTERS pExceptionPointers)
 {
-	string* str = (string*)stream;
-	(*str).append((char*)ptr, size*nmemb);
-	return size*nmemb;
-}
-wstring str_cvt(const string& from_str, int cvt_type) {
-	int wstr_len = MultiByteToWideChar(cvt_type, 0, from_str.c_str(), -1, nullptr, 0);
-	wchar_t *wstr = new wchar_t[wstr_len + 1];
-	memset(wstr, 0, (wstr_len + 1) * sizeof(wchar_t));
-	MultiByteToWideChar(cvt_type, 0, from_str.c_str(), -1, wstr, wstr_len);
-	wstring ret_str(wstr); delete[] wstr;
-	return ret_str;
-}
-string str_cvt(const wstring& from_str, int cvt_type) {
-	int str_len = WideCharToMultiByte(cvt_type, 0, from_str.c_str(), -1, nullptr, 0, nullptr, nullptr);
-	char *str = new char[str_len + 1];
-	memset(str, 0, str_len + 1);
-	WideCharToMultiByte(cvt_type, 0, from_str.c_str(), -1, str, str_len, nullptr, nullptr);
-	string ret_str(str); delete[] str;
-	return ret_str;
+	// 定义函数指针
+	typedef BOOL(WINAPI * MiniDumpWriteDumpT)(
+		HANDLE,
+		DWORD,
+		HANDLE,
+		MINIDUMP_TYPE,
+		PMINIDUMP_EXCEPTION_INFORMATION,
+		PMINIDUMP_USER_STREAM_INFORMATION,
+		PMINIDUMP_CALLBACK_INFORMATION
+		);
+	// 从 "DbgHelp.dll" 库中获取 "MiniDumpWriteDump" 函数
+	MiniDumpWriteDumpT pfnMiniDumpWriteDump = NULL;
+	HMODULE hDbgHelp = LoadLibraryA("DbgHelp.dll");
+	if (NULL == hDbgHelp)
+	{
+		return EXCEPTION_CONTINUE_EXECUTION;
+	}
+	pfnMiniDumpWriteDump = (MiniDumpWriteDumpT)GetProcAddress(hDbgHelp, "MiniDumpWriteDump");
+
+	if (NULL == pfnMiniDumpWriteDump)
+	{
+		FreeLibrary(hDbgHelp);
+		return EXCEPTION_CONTINUE_EXECUTION;
+	}
+	// 创建 dmp 文件件
+	TCHAR szFileName[MAX_PATH] = { 0 };
+	TCHAR* szVersion = ("DumpDemo_v1.0");
+	SYSTEMTIME stLocalTime;
+	GetLocalTime(&stLocalTime);
+	wsprintf(szFileName, "%s-%04d%02d%02d-%02d%02d%02d.dmp",
+		szVersion, stLocalTime.wYear, stLocalTime.wMonth, stLocalTime.wDay,
+		stLocalTime.wHour, stLocalTime.wMinute, stLocalTime.wSecond);
+	HANDLE hDumpFile = CreateFile(szFileName, GENERIC_READ | GENERIC_WRITE,
+		FILE_SHARE_WRITE | FILE_SHARE_READ, 0, CREATE_ALWAYS, 0, 0);
+	if (INVALID_HANDLE_VALUE == hDumpFile)
+	{
+		FreeLibrary(hDbgHelp);
+		return EXCEPTION_CONTINUE_EXECUTION;
+	}
+	// 写入 dmp 文件
+	MINIDUMP_EXCEPTION_INFORMATION expParam;
+	expParam.ThreadId = GetCurrentThreadId();
+	expParam.ExceptionPointers = pExceptionPointers;
+	expParam.ClientPointers = FALSE;
+	pfnMiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(),
+		hDumpFile, MiniDumpWithDataSegs, (pExceptionPointers ? &expParam : NULL), NULL, NULL);
+	// 释放文件
+	CloseHandle(hDumpFile);
+	FreeLibrary(hDbgHelp);
+	return EXCEPTION_EXECUTE_HANDLER;
 }
 
-#define  SKIP_PEER_VERIFICATION 1  
-//#define  SKIP_HOSTNAME_VERFICATION 1  
-
-/*
-ptr是指向存储数据的指针，
-size是每个块的大小，
-nmemb是指块的数目，
-stream是用户参数。
-所以根据以上这些参数的信息可以知道，ptr中的数据的总长度是size*nmemb
-*/
-size_t call_wirte_func(const char *ptr, size_t size, size_t nmemb, std::string *stream)
+LONG WINAPI ExceptionFilter(LPEXCEPTION_POINTERS lpExceptionInfo)
 {
-	assert(stream != NULL);
-	size_t len = size * nmemb;
-	stream->append(ptr, len);
-	return len;
+	// 这里做一些异常的过滤或提示
+	if (IsDebuggerPresent())
+	{
+		return EXCEPTION_CONTINUE_SEARCH;
+	}
+	return GenerateMiniDump(lpExceptionInfo);
 }
-// 返回http header回调函数    
-size_t header_callback(const char  *ptr, size_t size, size_t nmemb, std::string *stream)
-{
-	assert(stream != NULL);
-	size_t len = size * nmemb;
-	stream->append(ptr, len);
-	return len;
-}
-
 
 size_t req_reply(void *ptr, size_t size, size_t nmemb, void *stream)
 {
@@ -145,12 +162,16 @@ CURLcode curl_post_req(const string &url, const string &postParams, string &resp
 int main(int arg , char ** args)
 {
 
+	SetUnhandledExceptionFilter(ExceptionFilter);
+
+	int *p = NULL;
+	*p = 1;
 	// global init  
 	curl_global_init(CURL_GLOBAL_ALL);
 
 	CURLcode res;
 	// test get requery  
-	string getUrlStr = "https://cn.bing.com/images/trending?form=Z9LH";
+	string getUrlStr = "http://cn.bing.com/images/trending?form=Z9LH";
 	string getResponseStr;
 	res = curl_get_req(getUrlStr, getResponseStr);
 	if (res != CURLE_OK)
@@ -159,14 +180,14 @@ int main(int arg , char ** args)
 		cout << getResponseStr << endl;
 
 	// test post requery  
-// 	string postUrlStr = "https://www.baidu.com/s";
-// 	string postParams = "f=8&rsv_bp=1&rsv_idx=1&word=picture&tn=98633779_hao_pg";
-// 	string postResponseStr;
-// 	res = curl_post_req(postUrlStr, postParams, postResponseStr);
-// 	if (res != CURLE_OK)
-// 		cerr << "curl_easy_perform() failed: " + string(curl_easy_strerror(res)) << endl;
-// 	else
-// 		cout << postResponseStr << endl;
+	string postUrlStr = "https://www.baidu.com/s";
+	string postParams = "f=8&rsv_bp=1&rsv_idx=1&word=picture&tn=98633779_hao_pg";
+	string postResponseStr;
+	res = curl_post_req(postUrlStr, postParams, postResponseStr);
+	if (res != CURLE_OK)
+		cerr << "curl_easy_perform() failed: " + string(curl_easy_strerror(res)) << endl;
+	else
+		cout << postResponseStr << endl;
 
 	// global release  
 	curl_global_cleanup();
